@@ -14,7 +14,9 @@ STEPS = [{"id": 7, "body": "Spin down cells", "finished": 0}]
 def fake_api(request: httpx.Request) -> httpx.Response:
     path, method = request.url.path.removeprefix("/api/v2"), request.method
     fake_api.calls.append((method, path, request))
-    if method == "POST" and path in ("/experiments", "/items"):
+    if method == "GET" and path == "/items_types":
+        return httpx.Response(200, json=[{"id": 1, "title": "Antibody"}])
+    if method == "POST" and path in ("/experiments", "/items", "/items_types"):
         return httpx.Response(201, headers={"location": f"https://elab.test/api/v2{path}/42"})
     if method == "POST" and path.endswith("/steps"):
         return httpx.Response(201, headers={"location": "https://elab.test/api/v2/experiments/1/steps/9"})
@@ -53,6 +55,7 @@ def test_all_tools_registered():
     assert names == {
         "search_entries", "get_entry", "list_templates", "list_resource_categories", "create_experiment",
         "create_item", "append_note", "set_extra_fields", "attach_file", "add_step", "complete_step", "link_item",
+        "create_resource_category",
     }
 
 
@@ -131,3 +134,32 @@ def test_verify_ssl_values(monkeypatch, tmp_path):
     monkeypatch.setenv("ELABFTW_VERIFY_SSL", str(tmp_path / "missing.pem"))
     with pytest.raises(FileNotFoundError):
         elabftw_mcp._verify()
+
+
+def test_create_resource_category_sends_fields(mock_api):
+    out = call("create_resource_category", title="Instruments", description="Lab equipment", fields=[
+        {"name": "Serial number"},
+        {"name": "Last service", "type": "date"},
+        {"name": "Status", "type": "select", "options": ["In use", "Broken"]},
+        {"name": "Max temperature", "type": "number", "unit": "°C"},
+    ])
+    post = [r for m, p, r in mock_api if m == "POST"][0]
+    sent = body(post)
+    fields = json.loads(sent["metadata"])["extra_fields"]
+    assert sent["title"] == "Instruments" and "Lab equipment" in sent["body"]
+    assert list(fields) == ["Serial number", "Last service", "Status", "Max temperature"]
+    assert fields["Status"]["options"] == ["In use", "Broken"] and fields["Max temperature"]["unit"] == "°C"
+    assert fields["Last service"]["type"] == "date" and fields["Serial number"]["position"] == 1
+    assert "42" in str(out)
+
+
+@pytest.mark.parametrize("args, message", [
+    ({"title": "antibody"}, "already exists"),
+    ({"title": "X", "fields": [{"name": "A", "type": "colour"}]}, "type must be one of"),
+    ({"title": "X", "fields": [{"name": "A", "type": "select"}]}, "needs options"),
+    ({"title": "X", "fields": [{"name": "A"}, {"name": "A"}]}, "listed twice"),
+])
+def test_create_resource_category_refuses_bad_input(mock_api, args, message):
+    with pytest.raises(Exception, match=message):
+        call("create_resource_category", **args)
+    assert not [c for c in mock_api if c[0] == "POST"]

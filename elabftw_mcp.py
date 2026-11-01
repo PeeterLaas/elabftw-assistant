@@ -17,7 +17,7 @@ import re
 import ssl
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Required, TypedDict
 
 import httpx
 from mcp.server.mcpserver import MCPServer
@@ -171,6 +171,76 @@ def create_item(category_id: int, title: str, description: str = "") -> dict[str
     if description:
         _request("PATCH", f"/items/{new_id}", json={"bodyappend": f"<p>{html.escape(description)}</p>"})
     return {"id": new_id, "title": title}
+
+
+FIELD_TYPES = ("text", "number", "date", "datetime-local", "time", "email", "url", "select", "checkbox", "users", "items", "experiments")
+
+
+class CategoryField(TypedDict, total=False):
+    name: Required[str]
+    type: str  # one of FIELD_TYPES, default "text"
+    options: list[str]  # choices, required for "select"
+    unit: str  # e.g. "°C", only for "number"
+    required: bool
+    description: str
+
+
+@mcp.tool(annotations=_WRITE)
+def create_resource_category(title: str, fields: list[CategoryField] | None = None, description: str = "") -> dict[str, Any]:
+    """Create a resource category (e.g. Projects, People, Instruments) with its extra fields.
+
+    Needs team admin rights unless the team lets everyone create categories. Refuses a title that
+    already exists in the team. Field types: text, number, date, datetime-local, time, email, url,
+    select (give options), checkbox, users (a team member), items (link to a resource), experiments.
+    Example fields: [{"name": "Serial number"}, {"name": "Room"}, {"name": "Last service", "type": "date"},
+    {"name": "Status", "type": "select", "options": ["In use", "Broken", "Retired"]}]
+    """
+    _check_writable()
+    title = title.strip()
+    if not title:
+        raise ToolError("A category needs a title")
+    existing = _request("GET", "/items_types").json()
+    if any((t.get("title") or "").strip().lower() == title.lower() for t in existing):
+        raise ToolError(f"A resource category called '{title}' already exists")
+
+    extra: dict[str, Any] = {}
+    for position, field in enumerate(fields or [], 1):
+        name = (field.get("name") or "").strip()
+        kind = field.get("type") or "text"
+        if not name:
+            raise ToolError(f"Field {position} has no name")
+        if name in extra:
+            raise ToolError(f"Field '{name}' is listed twice")
+        if kind not in FIELD_TYPES:
+            raise ToolError(f"Field '{name}': type must be one of {', '.join(FIELD_TYPES)}")
+        spec: dict[str, Any] = {"type": kind, "value": "", "position": position}
+        if kind == "select":
+            options = [o for o in field.get("options") or [] if o]
+            if not options:
+                raise ToolError(f"Field '{name}' is a select field and needs options")
+            spec["options"] = options
+        if field.get("unit") and kind == "number":
+            spec["unit"] = field["unit"]
+            spec["units"] = [field["unit"]]
+        if field.get("required"):
+            spec["required"] = True
+        if field.get("description"):
+            spec["description"] = field["description"]
+        extra[name] = spec
+
+    payload: dict[str, Any] = {"title": title}
+    if description:
+        payload["body"] = f"<p>{html.escape(description)}</p>"
+    if extra:
+        # sent pre-encoded, as eLabFTW stores the metadata column as a JSON string
+        payload["metadata"] = json.dumps({"extra_fields": extra})
+    try:
+        new_id = _id_from_location(_request("POST", "/items_types", json=payload))
+    except ToolError as e:
+        if "(403)" in str(e):
+            raise ToolError("Only a team admin can create resource categories in this team") from e
+        raise
+    return {"id": new_id, "title": title, "fields": list(extra)}
 
 
 @mcp.tool(annotations=_WRITE)

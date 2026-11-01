@@ -11,6 +11,7 @@ An MCP server that lets an AI assistant (Claude Desktop, Claude Code, or any oth
 | `list_templates` / `list_resource_categories` | Discover templates and resource categories |
 | `create_experiment` | New experiment, optionally from a template, with tags |
 | `create_item` | New resource (sample, reagent...) in a category |
+| `create_resource_category` | New resource category (e.g. Instruments) with its fields; team admins only |
 | `append_note` | Append a timestamped note; existing text is never modified |
 | `set_extra_fields` | Fill structured fields, e.g. `{"Yield": "4.2"}` |
 | `attach_file` | Upload a photo or instrument file |
