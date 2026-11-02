@@ -98,12 +98,18 @@ def _summary(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_READ)
-def search_entries(entity_type: EntityType, query: str = "", limit: int = 10) -> list[dict[str, Any]]:
+def search_entries(
+    entity_type: EntityType, query: str = "", limit: int = 10, include_other_teams: bool = False
+) -> list[dict[str, Any]]:
     """Search experiments or items (resources) by text in title, body or elabid.
 
-    An empty query returns the most recently modified entries.
+    An empty query returns the most recently modified entries. By default this follows the
+    user's own setting, normally their team only. Set include_other_teams to also find entries
+    other teams have shared, such as a lab-wide instrument and protocol library.
     """
     params: dict[str, Any] = {"limit": limit, "order": "lastchange", "sort": "desc"}
+    if include_other_teams:
+        params["scope"] = 3  # eLabFTW Scope::Everything
     if query:
         params["q"] = query
     return [_summary(e) for e in _request("GET", f"/{entity_type}", params=params).json()]
@@ -136,13 +142,27 @@ def list_templates() -> list[dict[str, Any]]:
     return [{"id": t["id"], "title": t["title"]} for t in _request("GET", "/experiments_templates").json()]
 
 
+def _own_categories() -> list[dict[str, Any]]:
+    """Categories of the current team. The API also returns other teams' non-private ones."""
+    categories = _request("GET", "/teams/current/resources_categories").json()
+    return [c for c in categories if c.get("is_current_team", 1)]
+
+
 @mcp.tool(annotations=_READ)
 def list_resource_categories() -> list[dict[str, Any]]:
-    """List resource types (e.g. Antibody, Plasmid, Microscope), needed to create items.
+    """List your team's resource categories (e.g. Antibody, Plasmid, Microscope), needed to create items.
 
-    Each type is a template carrying default text and extra fields for new items.
+    Each category lists its templates, which carry default text and extra fields for new items.
     """
-    return [{"id": t["id"], "title": t["title"]} for t in _request("GET", "/items_types").json()]
+    templates = _request("GET", "/items_types").json()
+    return [
+        {
+            "id": c["id"],
+            "title": c["title"],
+            "templates": [{"id": t["id"], "title": t["title"]} for t in templates if t.get("category") == c["id"]],
+        }
+        for c in _own_categories()
+    ]
 
 
 # --- Writing ---------------------------------------------------------------
@@ -160,17 +180,33 @@ def create_experiment(title: str, template_id: int = -1, tags: list[str] | None 
 
 
 @mcp.tool(annotations=_WRITE)
-def create_item(category_id: int, title: str, description: str = "") -> dict[str, Any]:
+def create_item(category_id: int, title: str, description: str = "", template_id: int | None = None) -> dict[str, Any]:
     """Create a new resource (sample, reagent...) in a category from list_resource_categories.
 
-    The category's default text and extra fields are copied into the new item.
+    If the category has a template, its default text and extra fields are copied into the new item.
+    Pass template_id to choose between several templates.
     """
     _check_writable()
-    # categories are resource templates: creating from one copies its body and extra fields
-    new_id = _id_from_location(_request("POST", "/items", json={"title": title, "template": category_id}))
+    category = next((c for c in _own_categories() if c["id"] == category_id), None)
+    if category is None:
+        raise ToolError(f"Category {category_id} is not in your team; use list_resource_categories")
+    templates = _request("GET", "/items_types").json()
+    if template_id is None:
+        template = next((t for t in templates if t.get("category") == category_id), None)
+    else:
+        template = next((t for t in templates if t["id"] == template_id), None)
+        if template is None:
+            raise ToolError(f"Template {template_id} not found; use list_resource_categories")
+    payload: dict[str, Any] = {"title": title, "category": category_id}
+    if template:
+        # creating from a template copies its body, fields and category, and ignores "category" in the request
+        payload = {"title": title, "template": template["id"]}
+    new_id = _id_from_location(_request("POST", "/items", json=payload))
+    if template and template.get("category") != category_id:
+        _request("PATCH", f"/items/{new_id}", json={"category": category_id})
     if description:
         _request("PATCH", f"/items/{new_id}", json={"bodyappend": f"<p>{html.escape(description)}</p>"})
-    return {"id": new_id, "title": title}
+    return {"id": new_id, "title": title, "category": category["title"], "template_id": template["id"] if template else None}
 
 
 FIELD_TYPES = ("text", "number", "date", "datetime-local", "time", "email", "url", "select", "checkbox", "users", "items", "experiments")
@@ -187,8 +223,9 @@ class CategoryField(TypedDict, total=False):
 
 @mcp.tool(annotations=_WRITE)
 def create_resource_category(title: str, fields: list[CategoryField] | None = None, description: str = "") -> dict[str, Any]:
-    """Create a resource category (e.g. Projects, People, Instruments) with its extra fields.
+    """Create a resource category (e.g. Projects, People, Instruments) and a template holding its extra fields.
 
+    New items in the category start from that template. No template is made without fields or a description.
     Needs team admin rights unless the team lets everyone create categories. Refuses a title that
     already exists in the team. Field types: text, number, date, datetime-local, time, email, url,
     select (give options), checkbox, users (a team member), items (link to a resource), experiments.
@@ -199,8 +236,8 @@ def create_resource_category(title: str, fields: list[CategoryField] | None = No
     title = title.strip()
     if not title:
         raise ToolError("A category needs a title")
-    existing = _request("GET", "/items_types").json()
-    if any((t.get("title") or "").strip().lower() == title.lower() for t in existing):
+    existing = _own_categories()
+    if any((c.get("title") or "").strip().lower() == title.lower() for c in existing):
         raise ToolError(f"A resource category called '{title}' already exists")
 
     extra: dict[str, Any] = {}
@@ -228,19 +265,27 @@ def create_resource_category(title: str, fields: list[CategoryField] | None = No
             spec["description"] = field["description"]
         extra[name] = spec
 
-    payload: dict[str, Any] = {"title": title}
+    try:
+        # this endpoint names the title "name"; only PATCH calls it "title"
+        category_id = _id_from_location(_request("POST", "/teams/current/resources_categories", json={"name": title}))
+    except ToolError as e:
+        if "(403)" in str(e):
+            raise ToolError("Only a team admin can create resource categories in this team") from e
+        raise
+    if not extra and not description:
+        return {"id": category_id, "title": title, "template_id": None, "fields": []}
+
+    payload: dict[str, Any] = {"title": title, "category": category_id}
     if description:
         payload["body"] = f"<p>{html.escape(description)}</p>"
     if extra:
         # sent pre-encoded, as eLabFTW stores the metadata column as a JSON string
         payload["metadata"] = json.dumps({"extra_fields": extra})
     try:
-        new_id = _id_from_location(_request("POST", "/items_types", json=payload))
+        template_id = _id_from_location(_request("POST", "/items_types", json=payload))
     except ToolError as e:
-        if "(403)" in str(e):
-            raise ToolError("Only a team admin can create resource categories in this team") from e
-        raise
-    return {"id": new_id, "title": title, "fields": list(extra)}
+        raise ToolError(f"Category '{title}' (id {category_id}) was created, but its template failed: {e}") from e
+    return {"id": category_id, "title": title, "template_id": template_id, "fields": list(extra)}
 
 
 @mcp.tool(annotations=_WRITE)

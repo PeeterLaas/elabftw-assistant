@@ -6,12 +6,12 @@ An MCP server that lets an AI assistant (Claude Desktop, Claude Code, or any oth
 
 | Tool | What it does |
 |---|---|
-| `search_entries` | Find experiments or resources by text (most recent first) |
+| `search_entries` | Find experiments or resources by text (most recent first); optionally include what other teams share |
 | `get_entry` | Read an entry: body, extra fields, steps, links, attachments |
-| `list_templates` / `list_resource_categories` | Discover templates and resource categories |
+| `list_templates` / `list_resource_categories` | Discover experiment templates, and resource categories with their templates |
 | `create_experiment` | New experiment, optionally from a template, with tags |
-| `create_item` | New resource (sample, reagent...) in a category |
-| `create_resource_category` | New resource category (e.g. Instruments) with its fields; team admins only |
+| `create_item` | New resource (sample, reagent...) in a category, starting from its template |
+| `create_resource_category` | New resource category (e.g. Instruments) plus a template with its fields; team admins only |
 | `append_note` | Append a timestamped note; existing text is never modified |
 | `set_extra_fields` | Fill structured fields, e.g. `{"Yield": "4.2"}` |
 | `attach_file` | Upload a photo or instrument file |
