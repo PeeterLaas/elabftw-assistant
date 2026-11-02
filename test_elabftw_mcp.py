@@ -14,8 +14,16 @@ STEPS = [{"id": 7, "body": "Spin down cells", "finished": 0}]
 def fake_api(request: httpx.Request) -> httpx.Response:
     path, method = request.url.path.removeprefix("/api/v2"), request.method
     fake_api.calls.append((method, path, request))
+    if method == "GET" and path == "/teams/current/resources_categories":
+        return httpx.Response(200, json=[
+            {"id": 2, "title": "Antibody", "is_current_team": 1},
+            {"id": 3, "title": "Empty", "is_current_team": 1},
+            {"id": 9, "title": "Shared by another team", "is_current_team": 0},
+        ])
     if method == "GET" and path == "/items_types":
-        return httpx.Response(200, json=[{"id": 1, "title": "Antibody"}])
+        return httpx.Response(200, json=[{"id": 7, "title": "Antibody stock", "category": 2}, {"id": 8, "title": "Other", "category": None}])
+    if method == "POST" and path == "/teams/current/resources_categories":
+        return httpx.Response(201, headers={"location": f"https://elab.test/api/v2{path}/5"})
     if method == "POST" and path in ("/experiments", "/items", "/items_types"):
         return httpx.Response(201, headers={"location": f"https://elab.test/api/v2{path}/42"})
     if method == "POST" and path.endswith("/steps"):
@@ -75,10 +83,48 @@ def test_create_experiment_from_template_adds_tags_separately(mock_api):
     ]
 
 
-def test_create_item_uses_category_as_template(mock_api):
-    call("create_item", category_id=2, title="pUC19 stock", description="from Alice")
-    assert body(mock_api[0][2]) == {"title": "pUC19 stock", "template": 2}
-    assert body(mock_api[1][2]) == {"bodyappend": "<p>from Alice</p>"}
+def posts(calls):
+    return [(p, body(r)) for m, p, r in calls if m == "POST"]
+
+
+def test_list_categories_keeps_own_team_and_shows_templates(mock_api):
+    out = call("list_resource_categories").structured_content["result"]
+    assert [(c["id"], [x["id"] for x in c["templates"]]) for c in out] == [(2, [7]), (3, [])]
+
+
+def test_create_item_starts_from_the_categorys_template(mock_api):
+    out = call("create_item", category_id=2, title="pUC19 stock", description="from Alice").structured_content
+    assert posts(mock_api) == [("/items", {"title": "pUC19 stock", "template": 7})]
+    assert [body(r) for m, p, r in mock_api if m == "PATCH"] == [{"bodyappend": "<p>from Alice</p>"}]
+    assert out["category"] == "Antibody" and out["template_id"] == 7
+
+
+def test_create_item_without_template_sets_category(mock_api):
+    call("create_item", category_id=3, title="Thing")
+    assert posts(mock_api) == [("/items", {"title": "Thing", "category": 3})]
+
+
+def test_create_item_with_other_template_still_sets_category(mock_api):
+    call("create_item", category_id=2, title="Thing", template_id=8)
+    assert posts(mock_api) == [("/items", {"title": "Thing", "template": 8})]
+    assert [body(r) for m, p, r in mock_api if m == "PATCH"] == [{"category": 2}]
+
+
+@pytest.mark.parametrize("args, message", [
+    ({"category_id": 9, "title": "X"}, "not in your team"),
+    ({"category_id": 2, "title": "X", "template_id": 99}, "not found"),
+])
+def test_create_item_refuses_bad_ids(mock_api, args, message):
+    with pytest.raises(Exception, match=message):
+        call("create_item", **args)
+    assert not posts(mock_api)
+
+
+def test_search_can_include_other_teams(mock_api):
+    call("search_entries", entity_type="items", query="MinION", include_other_teams=True)
+    assert mock_api[-1][2].url.params["scope"] == "3"
+    call("search_entries", entity_type="items", query="MinION")
+    assert "scope" not in mock_api[-1][2].url.params
 
 
 def test_append_note_escapes_and_appends(mock_api):
@@ -136,21 +182,32 @@ def test_verify_ssl_values(monkeypatch, tmp_path):
         elabftw_mcp._verify()
 
 
-def test_create_resource_category_sends_fields(mock_api):
+def test_create_resource_category_makes_category_and_template(mock_api):
     out = call("create_resource_category", title="Instruments", description="Lab equipment", fields=[
         {"name": "Serial number"},
         {"name": "Last service", "type": "date"},
         {"name": "Status", "type": "select", "options": ["In use", "Broken"]},
         {"name": "Max temperature", "type": "number", "unit": "°C"},
-    ])
-    post = [r for m, p, r in mock_api if m == "POST"][0]
-    sent = body(post)
+    ]).structured_content
+    created = posts(mock_api)
+    assert created[0] == ("/teams/current/resources_categories", {"name": "Instruments"})
+    path, sent = created[1]
     fields = json.loads(sent["metadata"])["extra_fields"]
-    assert sent["title"] == "Instruments" and "Lab equipment" in sent["body"]
+    assert path == "/items_types" and sent["title"] == "Instruments" and sent["category"] == 5 and "Lab equipment" in sent["body"]
     assert list(fields) == ["Serial number", "Last service", "Status", "Max temperature"]
     assert fields["Status"]["options"] == ["In use", "Broken"] and fields["Max temperature"]["unit"] == "°C"
     assert fields["Last service"]["type"] == "date" and fields["Serial number"]["position"] == 1
-    assert "42" in str(out)
+    assert out["id"] == 5 and out["template_id"] == 42
+
+
+def test_create_resource_category_without_fields_makes_no_template(mock_api):
+    out = call("create_resource_category", title="Plain").structured_content
+    assert [p for p, _ in posts(mock_api)] == ["/teams/current/resources_categories"] and out["template_id"] is None
+
+
+def test_another_teams_category_name_can_be_reused(mock_api):
+    call("create_resource_category", title="Shared by another team")
+    assert posts(mock_api)
 
 
 @pytest.mark.parametrize("args, message", [
