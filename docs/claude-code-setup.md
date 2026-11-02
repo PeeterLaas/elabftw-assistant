@@ -173,15 +173,28 @@ Then try it out:
 
 Keep eLabFTW open in the browser to watch the changes come in.
 
+## Update the assistant
+
+Run these when a new version is announced, then start a new Claude Code session:
+
+```sh
+cd ~/elabftw-assistant
+git pull
+uv sync
+```
+
+If your eLabFTW address changed, also run `claude mcp remove elabftw -s user`, then repeat step 7 with the new address.
+
 ## What the assistant can and can't do
 
 | Can | Can't |
 |---|---|
-| Search and read experiments and resources | Delete anything |
-| Create experiments (optionally from a template) and resources | Overwrite or edit existing text |
+| Search and read experiments and resources, including what other teams share | Delete anything |
+| Create experiments (optionally from a template) and resources in a category | Overwrite or edit existing text |
 | Append timestamped notes | Lock, sign or timestamp entries |
 | Fill extra fields, add and complete steps | Change permissions |
 | Attach files from **your** computer, link resources | |
+| Create resource categories with their fields (team admins, with a Read/Write key) | |
 
 Every change is recorded in eLabFTW under your name, and body edits keep a revision history. To make the assistant strictly read-only regardless of the key, add `-e ELABFTW_READ_ONLY=true` in step 7.
 
@@ -194,5 +207,6 @@ Every change is recorded in eLabFTW under your name, and body edits keep a revis
 | Tool errors mention `401` | The key is wrong, deleted, or belongs to another team (step 4) |
 | Tool errors mention `CERTIFICATE_VERIFY_FAILED` | See step 5 |
 | `File not found` when attaching | The path must exist on the computer running Claude Code |
-| Search finds nothing you know exists | You're probably in a different team than the key's. Create the key from the right team |
+| Search finds nothing you know exists | You're probably in a different team than the key's. Create the key from the right team. For something another team shared, ask Claude to include other teams |
+| Tool errors mention `410` or say eLabFTW moved | The address changed. See [Update the assistant](#update-the-assistant) |
 | You want to change a setting | `claude mcp remove elabftw -s user`, then add it again (step 7) |
